@@ -1,19 +1,42 @@
-"""内存数据仓库：给每个业务模块准备一份可筛选、可流转的示例数据。
+"""数据仓库：内存表 + 本地 JSON 快照。
 
 真实项目里这里会换成数据库访问层；当前实现只依赖标准库，保证克隆下来就能起。
+写操作成功后调 persist() 落盘，重启后从快照恢复，改动不会因为服务重启丢失。
 """
 from __future__ import annotations
 
+import json
+import threading
+from pathlib import Path
 from typing import Any
 
 from app.seed import SEED_ROWS
 
+DATA_FILE = Path(__file__).resolve().parent.parent / "data" / "store.json"
+
 
 class Store:
     def __init__(self) -> None:
-        self._tables: dict[str, list[dict[str, Any]]] = {
-            name: [dict(row) for row in rows] for name, rows in SEED_ROWS.items()
-        }
+        self._lock = threading.Lock()
+        self._tables: dict[str, list[dict[str, Any]]] = self._load()
+
+    def _load(self) -> dict[str, list[dict[str, Any]]]:
+        if DATA_FILE.exists():
+            try:
+                raw = json.loads(DATA_FILE.read_text(encoding="utf-8"))
+                return {name: [dict(row) for row in rows] for name, rows in raw.items()}
+            except (OSError, ValueError):
+                pass  # 快照损坏时退回种子数据，保证服务起得来
+        return {name: [dict(row) for row in rows] for name, rows in SEED_ROWS.items()}
+
+    def persist(self) -> None:
+        """把当前内存状态写入本地快照；任何写操作成功后都必须调一次。"""
+        with self._lock:
+            DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
+            DATA_FILE.write_text(
+                json.dumps(self._tables, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
 
     def module_names(self) -> list[str]:
         return sorted(self._tables)

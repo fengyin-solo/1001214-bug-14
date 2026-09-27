@@ -1,4 +1,4 @@
-"""途中核查接口：维护途中核查，覆盖执行核查、登记温度异常、登记封签异常等动作。"""
+"""途中核查接口：维护途中核查，覆盖执行核查、登记温度异常、登记封签异常、归档等动作。"""
 from __future__ import annotations
 
 from typing import Any
@@ -19,43 +19,16 @@ STATUSES = ["待核查", "已核查", "温度异常", "封签异常"]
 @router.get("", response_model=PageResult[dict])
 def list_entries(
     keyword: str | None = Query(default=None, description="按核查编号检索"),
+    dispatch: str | None = Query(default=None, description="按关联调度检索"),
     status: str | None = Query(default=None, description="待核查、已核查、温度异常、封签异常"),
     page: int = 1,
     size: int = 20,
 ) -> PageResult[dict]:
-    """按核查编号与状态过滤途中核查列表；没有数据时返回空页，不报错。"""
+    """按核查编号、关联调度与状态过滤途中核查列表；没有数据时返回空页，不报错。"""
     if size > 200:
         raise HTTPException(status_code=400, detail="每页最多 200 条，请缩小分页范围")
-    items, total = service.list_entries(keyword=keyword, status=status, page=page, size=size)
+    items, total = service.list_entries(keyword=keyword, dispatch=dispatch, status=status, page=page, size=size)
     return PageResult(items=items, total=total, page=page, size=size)
-
-
-@router.get("/{entry_id}", response_model=dict)
-def get_entry(entry_id: int) -> dict:
-    """读取单条途中核查明细；不存在时给出可读的错误说明。"""
-    entry = service.get_entry(entry_id)
-    if entry is None:
-        raise HTTPException(status_code=404, detail=f"途中核查 {entry_id} 不存在或已归档")
-    return entry
-
-
-@router.post("", response_model=ActionResult)
-def create_entry(payload: EntryPayload) -> ActionResult:
-    """登记一条途中核查，缺字段时说明原因而不是静默丢弃。"""
-    entry, missing = service.create_entry(payload.values)
-    if missing:
-        return ActionResult(ok=False, message=f"缺少必填字段：{'、'.join(missing)}")
-    return ActionResult(ok=True, message="途中核查已登记", entry=entry)
-
-
-@router.post("/{entry_id}/actions", response_model=ActionResult)
-def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
-    """对单条途中核查执行执行核查、登记温度异常、登记封签异常；不允许的动作会被拦下并说明原因。"""
-    action = str(payload.values.get("action") or "").strip()
-    entry, message = service.run_action(entry_id, action)
-    if entry is None:
-        return ActionResult(ok=False, message=message)
-    return ActionResult(ok=True, message=message, entry=entry)
 
 
 @router.get("/export")
@@ -63,3 +36,43 @@ def export_entries() -> dict[str, Any]:
     """导出途中核查清单：返回当前过滤条件下的全量数据。"""
     items, total = service.list_entries(page=1, size=10000)
     return {"module": "roadcheck", "total": total, "items": items}
+
+
+@router.get("/{entry_id}", response_model=dict)
+def get_entry(entry_id: int) -> dict:
+    """读取单条途中核查明细；归档记录仍可查询，不存在时给出可读的错误说明。"""
+    entry = service.get_entry(entry_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"途中核查 {entry_id} 不存在")
+    return entry
+
+
+@router.post("", response_model=ActionResult)
+def create_entry(payload: EntryPayload) -> ActionResult:
+    """登记一条途中核查；核查编号重复或缺字段时说明原因，不静默丢弃、不覆盖历史记录。"""
+    entry, error = service.create_entry(payload.values)
+    if entry is None:
+        return ActionResult(ok=False, message=error or "途中核查登记失败")
+    return ActionResult(ok=True, message="途中核查已登记", entry=entry)
+
+
+@router.put("/{entry_id}", response_model=ActionResult)
+def update_entry(entry_id: int, payload: EntryPayload) -> ActionResult:
+    """更新核查结果字段（核查时间、位置定位、温度记录、封签状态、核查人员）。
+
+    核查编号与关联调度建档后不可改；已归档记录只读，更新会被拦下并说明原因。
+    """
+    entry, error = service.update_entry(entry_id, payload.values)
+    if entry is None:
+        return ActionResult(ok=False, message=error or "途中核查更新失败")
+    return ActionResult(ok=True, message="途中核查结果已更新", entry=entry)
+
+
+@router.post("/{entry_id}/actions", response_model=ActionResult)
+def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
+    """对单条途中核查执行执行核查、登记温度异常、登记封签异常、归档；不允许的动作会被拦下并说明原因。"""
+    action = str(payload.values.get("action") or "").strip()
+    entry, message = service.run_action(entry_id, action)
+    if entry is None:
+        return ActionResult(ok=False, message=message)
+    return ActionResult(ok=True, message=message, entry=entry)
